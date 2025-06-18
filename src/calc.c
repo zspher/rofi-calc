@@ -22,6 +22,7 @@
 // TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include "glib.h"
 #include <errno.h>
 #include <gio/gio.h>
 #include <gmodule.h>
@@ -33,10 +34,17 @@
 #include <rofi/helper.h>
 #include <rofi/mode-private.h>
 #include <rofi/mode.h>
+#include <rofi/rofi-types.h>
 
 #include <stdint.h>
 
 G_MODULE_EXPORT Mode mode;
+
+typedef struct {
+    gboolean no_bold;
+    gboolean no_unicode;
+    gboolean terse;
+} CALCModeConfig;
 
 // The internal data structure holding the private data of the TEST Mode.
 typedef struct {
@@ -47,6 +55,7 @@ typedef struct {
     char *last_result;
     char *previous_input;
     GPtrArray *history;
+    CALCModeConfig config;
 } CALCModePrivateData;
 
 // Used in splitting equations into {expression} and {result}.
@@ -59,19 +68,19 @@ typedef struct {
 #define QALC_BINARY_OPTION "-qalc-binary"
 
 // Calc command option
-#define CALC_COMMAND_OPTION "-calc-command"
+#define CALC_COMMAND_OPTION "calc-command"
 
 // Whether calc command emits a history entry
 #define CALC_COMMAND_USES_HISTORY "-calc-command-history"
 
 // Option to disable bold results
-#define NO_BOLD_OPTION "-no-bold"
+#define NO_BOLD_OPTION "no-bold"
 
 // Option to disable qalc's unicode mode
-#define NO_UNICODE "-no-unicode"
+#define NO_UNICODE_OPTION "no-unicode"
 
 // Terse option
-#define TERSE_OPTION "-terse"
+#define TERSE_OPTION "terse"
 
 // Option to specify result hint
 #define HINT_RESULT "-hint-result"
@@ -248,8 +257,49 @@ static void get_calc(Mode *sw) {
     pd->history = g_ptr_array_new();
     pd->previous_input = g_strdup(""); // providing initial value
 
+    ConfigEntry *config_file = rofi_config_find_widget(sw->name, NULL, TRUE);
+
+    pd->config.no_bold = FALSE;
+    pd->config.no_unicode = FALSE;
+    pd->config.terse = FALSE;
+
+    if (config_file != NULL) {
+        Property *no_bold = rofi_theme_find_property(config_file, P_BOOLEAN,
+                                                     NO_BOLD_OPTION, TRUE);
+        if (no_bold != NULL && (no_bold->type == P_BOOLEAN)) {
+            pd->config.no_bold = no_bold->value.b;
+        }
+
+        Property *terse = rofi_theme_find_property(config_file, P_BOOLEAN,
+                                                   TERSE_OPTION, TRUE);
+        if (terse != NULL && (terse->type == P_BOOLEAN)) {
+            pd->config.terse = terse->value.b;
+        }
+
+        Property *no_unicode = rofi_theme_find_property(
+            config_file, P_BOOLEAN, NO_UNICODE_OPTION, TRUE);
+        if (no_unicode != NULL && (no_unicode->type == P_BOOLEAN)) {
+            pd->config.no_unicode = no_unicode->value.b;
+        }
+
+        Property *cmd_option = rofi_theme_find_property(
+            config_file, P_STRING, CALC_COMMAND_OPTION, TRUE);
+        if (cmd_option != NULL &&
+            (cmd_option->type == P_STRING && cmd_option->value.s)) {
+            pd->cmd = g_strdup(cmd_option->value.s);
+        }
+    }
+    if (find_arg("-" NO_BOLD_OPTION) > -1)
+        pd->config.no_bold = TRUE;
+
+    if (find_arg("-" TERSE_OPTION) > -1)
+        pd->config.terse = TRUE;
+
+    if (find_arg("-" NO_UNICODE_OPTION) > -1)
+        pd->config.no_unicode = TRUE;
+
     char *cmd = NULL;
-    if (find_arg_str(CALC_COMMAND_OPTION, &cmd)) {
+    if (find_arg_str("-" CALC_COMMAND_OPTION, &cmd)) {
         pd->cmd = g_strdup(cmd);
     }
 
@@ -313,7 +363,8 @@ static unsigned int calc_mode_get_num_entries(const Mode *sw) {
     const CALCModePrivateData *pd =
         (const CALCModePrivateData *)mode_get_private_data(sw);
 
-    // Add +1 because we put a static message into the history array as well.
+    // Add +1 because we put a static message into the history array as
+    // well.
     return pd->history->len + 1;
 }
 
@@ -350,16 +401,17 @@ static void append_last_result_to_history(CALCModePrivateData *pd) {
     }
 }
 
-// Split the equation result into the left (expression) and right (result) side
-// of the equals sign.
+// Split the equation result into the left (expression) and right (result)
+// side of the equals sign.
 //
-// Note that both sides can themselves contain equals sign, consider the simple
-// example of `20x + 40 = 100`. This means we cannot naively split on the '='
-// character.
-static char **split_equation(char *string) {
+// Note that both sides can themselves contain equals sign, consider the
+// simple example of `20x + 40 = 100`. This means we cannot naively split on
+// the '=' character.
+static char **split_equation(Mode *sw, char *string) {
+    CALCModePrivateData *pd = (CALCModePrivateData *)mode_get_private_data(sw);
     char **result = malloc(2 * sizeof(char *));
 
-    if (find_arg(TERSE_OPTION) > -1) {
+    if (pd->config.terse) {
         result[0] = NULL;
         result[1] = g_strdup(string); // with -terse, string _is_ the result
         return result;
@@ -391,12 +443,13 @@ static char **split_equation(char *string) {
     }
 
     if (curr == string) {
-        // No equals signs were found. Shouldn't happen, but if it does treat
-        // the entire expression as the result.
+        // No equals signs were found. Shouldn't happen, but if it does
+        // treat the entire expression as the result.
         result[0] = NULL;
         result[1] = g_strdup(string);
     } else {
-        // We found an equals sign; set it to null to split the string in two.
+        // We found an equals sign; set it to null to split the string in
+        // two.
         *curr = '\0';
 
         // Strip trailing whitespace with `g_strchomp()` from the left.
@@ -408,7 +461,7 @@ static char **split_equation(char *string) {
     return result;
 }
 
-static void execsh(char *cmd, char *entry) {
+static void execsh(Mode *sw, char *cmd, char *entry) {
     // If no command was provided, simply print the entry
     if (cmd == NULL) {
         printf("%s\n", entry);
@@ -416,7 +469,7 @@ static void execsh(char *cmd, char *entry) {
     }
 
     // Otherwise, we will execute -calc-command
-    char **parts = split_equation(entry);
+    char **parts = split_equation(sw, entry);
     char *user_cmd = helper_string_replace_if_exists(
         cmd, EQUATION_LHS_KEY, parts[0], EQUATION_RHS_KEY, parts[1], NULL);
     g_free(parts);
@@ -458,7 +511,7 @@ static ModeMode calc_mode_result(Mode *sw, int menu_entry,
                 pd->history,
                 get_real_history_index(pd->history, selected_line));
 
-        execsh(pd->cmd, entry);
+        execsh(sw, pd->cmd, entry);
         retv = MODE_EXIT;
     } else if (menu_entry & MENU_CUSTOM_INPUT) {
         if (!is_error_string(pd->last_result) && strlen(pd->last_result) > 0) {
@@ -471,7 +524,7 @@ static ModeMode calc_mode_result(Mode *sw, int menu_entry,
                 }
             }
 
-            execsh(pd->cmd, pd->last_result);
+            execsh(sw, pd->cmd, pd->last_result);
             retv = MODE_EXIT;
         } else {
             retv = RELOAD_DIALOG;
@@ -555,8 +608,8 @@ static void process_cb(GObject *source_object, GAsyncResult *res,
     g_subprocess_wait_check_finish(process, res, &error);
 
     if (error != NULL) {
-        // With qalculate >= 5.0.0, exit status 1 can mean bad (or incomplete)
-        // input
+        // With qalculate >= 5.0.0, exit status 1 can mean bad (or
+        // incomplete) input
         if (error->domain != G_SPAWN_EXIT_ERROR || error->code != 1) {
             g_error("Process errored with: %s", error->message);
         }
@@ -610,10 +663,10 @@ static char *calc_preprocess_input(Mode *sw, const char *input) {
     g_ptr_array_add(argv, qalc_binary);
     g_ptr_array_add(argv, "-s");
     g_ptr_array_add(argv, "update_exchange_rates 1days");
-    if (find_arg(TERSE_OPTION) > -1) {
+    if (pd->config.terse) {
         g_ptr_array_add(argv, "-t");
     }
-    if (find_arg(NO_UNICODE) > -1) {
+    if (!pd->config.no_unicode) {
         g_ptr_array_add(argv, "+u8");
     }
     g_ptr_array_add(argv, (gchar *)input);
@@ -644,7 +697,8 @@ static char *calc_get_message(const Mode *sw) {
     }
 
     if (*pd->last_result) {
-        if (find_arg(NO_BOLD_OPTION) == -1)
+
+        if (!pd->config.no_bold)
             return g_markup_printf_escaped("%s<b>%s</b>", pd->hint_result,
                                            pd->last_result);
         else
