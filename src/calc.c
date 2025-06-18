@@ -22,9 +22,9 @@
 // TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 // SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include "glib.h"
 #include <errno.h>
 #include <gio/gio.h>
+#include <glib.h>
 #include <gmodule.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +44,10 @@ typedef struct {
     gboolean no_bold;
     gboolean no_unicode;
     gboolean terse;
+    gboolean no_history;
+    gboolean no_persist_history;
+    gboolean automatic_save_to_history;
+    gboolean calc_command_uses_history;
 } CALCModeConfig;
 
 // The internal data structure holding the private data of the TEST Mode.
@@ -71,7 +75,7 @@ typedef struct {
 #define CALC_COMMAND_OPTION "calc-command"
 
 // Whether calc command emits a history entry
-#define CALC_COMMAND_USES_HISTORY "-calc-command-history"
+#define CALC_COMMAND_USES_HISTORY "calc-command-history"
 
 // Option to disable bold results
 #define NO_BOLD_OPTION "no-bold"
@@ -83,15 +87,15 @@ typedef struct {
 #define TERSE_OPTION "terse"
 
 // Option to specify result hint
-#define HINT_RESULT "-hint-result"
+#define HINT_RESULT_OPTION "hint-result"
 #define HINT_RESULT_STR "Result: "
 
 // Option to specify welcome hint
-#define HINT_WELCOME "-hint-welcome"
+#define HINT_WELCOME_OPTION "hint-welcome"
 #define HINT_WELCOME_STR "Calculator"
 
 // Option to specify error color
-#define CALC_ERROR_COLOR "-calc-error-color"
+#define CALC_ERROR_COLOR "calc-error-color"
 #define CALC_ERROR_COLOR_STR "PaleVioletRed"
 
 // The following keys can be specified in `CALC_COMMAND_FLAG` and
@@ -101,9 +105,9 @@ typedef struct {
 #define EQUATION_RHS_KEY "{result}"
 
 // History stuff
-#define NO_PERSIST_HISTORY_OPTION "-no-persist-history"
-#define NO_HISTORY_OPTION "-no-history"
-#define AUTOMATIC_SAVE_TO_HISTORY "-automatic-save-to-history"
+#define NO_PERSIST_HISTORY_OPTION "no-persist-history"
+#define NO_HISTORY_OPTION "no-history"
+#define AUTOMATIC_SAVE_TO_HISTORY "automatic-save-to-history"
 #define HISTORY_LENGTH 100
 
 // Limit `str` to at most `limit` new lines.
@@ -249,19 +253,21 @@ static void delete_line_from_history(uint32_t line) {
     g_free(history_dir);
 }
 
-// Get the entries to display.
-// This gets called on plugin initialization.
-static void get_calc(Mode *sw) {
+static void set_config(Mode *sw) {
     CALCModePrivateData *pd = (CALCModePrivateData *)mode_get_private_data(sw);
-    pd->last_result = g_strdup("");
-    pd->history = g_ptr_array_new();
-    pd->previous_input = g_strdup(""); // providing initial value
-
     ConfigEntry *config_file = rofi_config_find_widget(sw->name, NULL, TRUE);
 
     pd->config.no_bold = FALSE;
     pd->config.no_unicode = FALSE;
     pd->config.terse = FALSE;
+    pd->config.no_history = FALSE;
+    pd->config.no_persist_history = FALSE;
+    pd->config.automatic_save_to_history = FALSE;
+    pd->config.calc_command_uses_history = FALSE;
+
+    pd->hint_result = HINT_RESULT_STR;
+    pd->hint_welcome = HINT_WELCOME_STR;
+    pd->calc_error_color = CALC_ERROR_COLOR_STR;
 
     if (config_file != NULL) {
         Property *no_bold = rofi_theme_find_property(config_file, P_BOOLEAN,
@@ -288,6 +294,59 @@ static void get_calc(Mode *sw) {
             (cmd_option->type == P_STRING && cmd_option->value.s)) {
             pd->cmd = g_strdup(cmd_option->value.s);
         }
+
+        Property *hint_result_option = rofi_theme_find_property(
+            config_file, P_STRING, HINT_RESULT_OPTION, TRUE);
+        if (hint_result_option != NULL &&
+            (hint_result_option->type == P_STRING &&
+             hint_result_option->value.s)) {
+            pd->hint_result = g_strdup(hint_result_option->value.s);
+        }
+
+        Property *hint_welcome_option = rofi_theme_find_property(
+            config_file, P_STRING, HINT_WELCOME_OPTION, TRUE);
+        if (hint_welcome_option != NULL &&
+            (hint_welcome_option->type == P_STRING &&
+             hint_welcome_option->value.s)) {
+            pd->hint_welcome = g_strdup(hint_welcome_option->value.s);
+        }
+
+        Property *calc_error_color_option = rofi_theme_find_property(
+            config_file, P_STRING, CALC_ERROR_COLOR, TRUE);
+        if (calc_error_color_option != NULL &&
+            (calc_error_color_option->type == P_STRING &&
+             calc_error_color_option->value.s)) {
+            pd->calc_error_color = g_strdup(calc_error_color_option->value.s);
+        }
+
+        Property *no_history = rofi_theme_find_property(
+            config_file, P_BOOLEAN, NO_HISTORY_OPTION, TRUE);
+        if (no_history != NULL && (no_history->type == P_BOOLEAN)) {
+            pd->config.no_history = no_history->value.b;
+        }
+
+        Property *no_persist_history = rofi_theme_find_property(
+            config_file, P_BOOLEAN, NO_PERSIST_HISTORY_OPTION, TRUE);
+        if (no_persist_history != NULL &&
+            (no_persist_history->type == P_BOOLEAN)) {
+            pd->config.no_persist_history = no_persist_history->value.b;
+        }
+
+        Property *automatic_save_to_history = rofi_theme_find_property(
+            config_file, P_BOOLEAN, AUTOMATIC_SAVE_TO_HISTORY, TRUE);
+        if (automatic_save_to_history != NULL &&
+            (automatic_save_to_history->type == P_BOOLEAN)) {
+            pd->config.automatic_save_to_history =
+                automatic_save_to_history->value.b;
+        }
+
+        Property *calc_command_uses_history = rofi_theme_find_property(
+            config_file, P_BOOLEAN, CALC_COMMAND_USES_HISTORY, TRUE);
+        if (calc_command_uses_history != NULL &&
+            (calc_command_uses_history->type == P_BOOLEAN)) {
+            pd->config.calc_command_uses_history =
+                calc_command_uses_history->value.b;
+        }
     }
     if (find_arg("-" NO_BOLD_OPTION) > -1)
         pd->config.no_bold = TRUE;
@@ -298,26 +357,50 @@ static void get_calc(Mode *sw) {
     if (find_arg("-" NO_UNICODE_OPTION) > -1)
         pd->config.no_unicode = TRUE;
 
+    if (find_arg("-" NO_HISTORY_OPTION) > -1)
+        pd->config.no_history = TRUE;
+
+    if (find_arg("-" NO_PERSIST_HISTORY_OPTION) > -1)
+        pd->config.no_persist_history = TRUE;
+
+    if (find_arg("-" AUTOMATIC_SAVE_TO_HISTORY) > -1)
+        pd->config.automatic_save_to_history = TRUE;
+
+    if (find_arg("-" CALC_COMMAND_USES_HISTORY) > -1)
+        pd->config.calc_command_uses_history = TRUE;
+
     char *cmd = NULL;
     if (find_arg_str("-" CALC_COMMAND_OPTION, &cmd)) {
         pd->cmd = g_strdup(cmd);
     }
 
+    char *hint_result = NULL;
+    if (find_arg_str("-" HINT_RESULT_OPTION, &hint_result)) {
+        pd->hint_result = g_strdup(hint_result);
+    }
+
+    char *hint_welcome = NULL;
+    if (find_arg_str("-" HINT_WELCOME_OPTION, &hint_welcome)) {
+        pd->hint_welcome = g_strdup(hint_welcome);
+    }
+
     char *calc_error_color = NULL;
     if (find_arg_str(CALC_ERROR_COLOR, &calc_error_color)) {
         pd->calc_error_color = g_strdup(calc_error_color);
-    } else {
-        pd->calc_error_color = CALC_ERROR_COLOR_STR;
     }
+}
 
-    pd->hint_result =
-        find_arg_str(HINT_RESULT, &cmd) ? g_strdup(cmd) : HINT_RESULT_STR;
+// Get the entries to display.
+// This gets called on plugin initialization.
+static void get_calc(Mode *sw) {
+    CALCModePrivateData *pd = (CALCModePrivateData *)mode_get_private_data(sw);
+    pd->last_result = g_strdup("");
+    pd->history = g_ptr_array_new();
+    pd->previous_input = g_strdup(""); // providing initial value
 
-    pd->hint_welcome =
-        find_arg_str(HINT_WELCOME, &cmd) ? g_strdup(cmd) : HINT_WELCOME_STR;
+    set_config(sw);
 
-    if (find_arg(NO_PERSIST_HISTORY_OPTION) == -1 &&
-        find_arg(NO_HISTORY_OPTION) == -1) {
+    if (!pd->config.no_history && !pd->config.no_persist_history) {
         // Load old history if it exists.
         GError *error = NULL;
         gchar *history_file = g_build_filename(g_get_user_data_dir(), "rofi",
@@ -395,7 +478,7 @@ static void append_last_result_to_history(CALCModePrivateData *pd) {
         }
 
         g_ptr_array_add(pd->history, (gpointer)history_entry);
-        if (find_arg(NO_PERSIST_HISTORY_OPTION) == -1) {
+        if (!pd->config.no_persist_history) {
             append_str_to_history(history_entry);
         }
     }
@@ -498,13 +581,13 @@ static ModeMode calc_mode_result(Mode *sw, int menu_entry,
     } else if (menu_entry & MENU_QUICK_SWITCH) {
         retv = (menu_entry & MENU_LOWER_MASK);
     } else if ((menu_entry & MENU_OK) &&
-               (selected_line == 0 && find_arg(NO_HISTORY_OPTION) == -1)) {
+               (selected_line == 0 && !pd->config.no_history)) {
         append_last_result_to_history(pd);
         retv = RELOAD_DIALOG;
     } else if ((menu_entry & MENU_OK) &&
-               (selected_line > 0 || find_arg(NO_HISTORY_OPTION) != -1)) {
+               (selected_line > 0 || pd->config.no_history)) {
         char *entry;
-        if (find_arg(NO_HISTORY_OPTION) != -1)
+        if (pd->config.no_history)
             entry = pd->last_result;
         else
             entry = g_ptr_array_index(
@@ -515,11 +598,11 @@ static ModeMode calc_mode_result(Mode *sw, int menu_entry,
         retv = MODE_EXIT;
     } else if (menu_entry & MENU_CUSTOM_INPUT) {
         if (!is_error_string(pd->last_result) && strlen(pd->last_result) > 0) {
-            if (find_arg(NO_HISTORY_OPTION) == -1 &&
+            if (!pd->config.no_history &&
                 find_arg(CALC_COMMAND_USES_HISTORY) != -1) {
                 char *history_entry = g_strdup_printf("%s", pd->last_result);
                 g_ptr_array_add(pd->history, (gpointer)history_entry);
-                if (find_arg(NO_PERSIST_HISTORY_OPTION) == -1) {
+                if (!pd->config.no_persist_history) {
                     append_str_to_history(history_entry);
                 }
             }
@@ -534,8 +617,7 @@ static ModeMode calc_mode_result(Mode *sw, int menu_entry,
             g_ptr_array_remove_index(
                 pd->history,
                 get_real_history_index(pd->history, selected_line));
-            if (find_arg(NO_PERSIST_HISTORY_OPTION) == -1 &&
-                find_arg(NO_HISTORY_OPTION) == -1) {
+            if (!pd->config.no_persist_history && !pd->config.no_history) {
                 delete_line_from_history(selected_line - 1);
             }
         }
@@ -558,7 +640,7 @@ static ModeMode calc_mode_result(Mode *sw, int menu_entry,
 
 static void calc_mode_destroy(Mode *sw) {
     CALCModePrivateData *pd = (CALCModePrivateData *)mode_get_private_data(sw);
-    if (find_arg(AUTOMATIC_SAVE_TO_HISTORY) != -1) {
+    if (pd->config.automatic_save_to_history) {
         append_last_result_to_history(pd);
     }
 
@@ -579,7 +661,7 @@ static char *calc_get_display_value(const Mode *sw, unsigned int selected_line,
     }
 
     if (selected_line == 0) {
-        if (find_arg(NO_HISTORY_OPTION) == -1)
+        if (!pd->config.no_history)
             return g_strdup("Add to history");
         else
             return g_strdup("");
