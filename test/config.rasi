@@ -1,0 +1,7 @@
+configuration {
+    calc {
+        no-bold: false;
+        terse: true;
+        calc-command: "notify-send {result}";
+    }
+}
